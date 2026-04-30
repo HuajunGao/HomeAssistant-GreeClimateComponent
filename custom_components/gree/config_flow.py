@@ -34,6 +34,8 @@ from .const import (
     CONF_SWING_MODES,
     CONF_TEMP_SENSOR_OFFSET,
     CONF_UID,
+    CONF_ZONE_CONTROLLER,
+    CONF_ZONE_COUNT,
     DEFAULT_FAN_MODES,
     DEFAULT_HVAC_MODES,
     DEFAULT_PORT,
@@ -43,7 +45,7 @@ from .const import (
     MAX_UNICAST_SCAN_HOSTS,
     OPTION_KEYS,
 )
-from .gree_protocol import test_connection, discover_gree_devices, detect_device_encryption
+from .gree_protocol import test_connection, discover_gree_devices, detect_device_encryption, get_zone_controller_count
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -213,6 +215,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors={"base": "cannot_connect"},
                 )
 
+            # Check if this is a zone controller (ducted system)
+            if self._selected_device.get("_zone_count"):
+                self._data[CONF_ZONE_CONTROLLER] = True
+                self._data[CONF_ZONE_COUNT] = self._selected_device["_zone_count"]
             return self.async_create_entry(title=device_name, data=self._data)
 
         # Detect encryption version for selected device
@@ -251,6 +257,21 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         # Store detected encryption version
         self._selected_device["encryption_version"] = encryption_version
+
+        # Probe for zone controller: fetch the session key first, then send subList
+        try:
+            from .gree_protocol import GetDeviceKey, GetDeviceKeyGCM
+            if encryption_version == 1:
+                key = await GetDeviceKey(mac_addr, ip_addr, port, max_retries=2)
+            else:
+                key = await GetDeviceKeyGCM(mac_addr, ip_addr, port, max_retries=2)
+            if key:
+                zone_count = await get_zone_controller_count(mac_addr, ip_addr, port, encryption_version, key)
+                if zone_count > 0:
+                    self._selected_device["_zone_count"] = zone_count
+                    _LOGGER.debug(f"Detected zone controller with {zone_count} zones for {mac_addr}")
+        except Exception as e:
+            _LOGGER.debug(f"Zone controller probe failed (not a zone controller): {e}")
 
         # Show device naming form with detected info
         data_schema = vol.Schema(

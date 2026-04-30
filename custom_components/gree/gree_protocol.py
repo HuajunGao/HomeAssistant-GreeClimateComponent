@@ -570,3 +570,38 @@ async def get_subunits_list(mac_addr, ip_addr, port):
     except Exception as e:
         _LOGGER.error(f"Error fetching sub-device list for {mac_addr}: {e}")
         return {"list": []}
+
+
+async def get_zone_controller_count(mac_addr, ip_addr, port, encryption_version, encryption_key):
+    """
+    Probe whether a device is a ducted zone controller by sending a subList request
+    with the device's own session key.  Returns the number of zones (int >= 1) if it
+    is a zone controller, or 0 if the device does not respond as one.
+
+    The zone controller (e.g. Braemar Dominator) responds to subList with:
+        {"t":"subList","r":200,"c":<zone_count>,"i":<bitmask>,"list":[]}
+    where "c" is the number of controllable zones.
+    """
+    try:
+        if encryption_version == 1:
+            cipher = AES.new(encryption_key, AES.MODE_ECB)
+            pack = base64.b64encode(
+                cipher.encrypt(Pad(f'{{"mac":"{mac_addr}","i":"1"}}').encode("utf8"))
+            ).decode("utf-8")
+            payload = f'{{"cid":"app","i":1,"pack":"{pack}","t":"subList","tcid":"{mac_addr}","uid":0}}'
+        elif encryption_version == 2:
+            pack, tag = EncryptGCM(encryption_key, f'{{"mac":"{mac_addr}","i":"1"}}')
+            payload = f'{{"cid":"app","i":1,"pack":"{pack}","t":"subList","tcid":"{mac_addr}","uid":0,"tag":"{tag}"}}'
+            cipher = GetGCMCipher(encryption_key)
+        else:
+            return 0
+
+        result = await FetchResult(cipher, ip_addr, port, payload,
+                                   encryption_version=encryption_version, max_retries=2)
+        _LOGGER.debug(f"get_zone_controller_count: {result}")
+        zone_count = result.get("c", 0)
+        if isinstance(zone_count, int) and zone_count > 0:
+            return zone_count
+    except Exception as e:
+        _LOGGER.debug(f"get_zone_controller_count: not a zone controller or error: {e}")
+    return 0

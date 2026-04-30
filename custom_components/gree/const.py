@@ -11,6 +11,17 @@ CONF_DISABLE_AVAILABLE_CHECK  = 'disable_available_check'
 CONF_TEMP_SENSOR_OFFSET = 'temp_sensor_offset'
 CONF_EXTRA_SCAN_NETWORKS = 'extra_scan_networks'
 CONF_EXTRA_SCAN_HOSTS = 'extra_scan_hosts'
+CONF_ZONE_CONTROLLER = 'zone_controller'
+CONF_ZONE_COUNT = 'zone_count'
+
+# Zone controller parameter lists
+ZONE_CONTROLLER_MASTER_PARAMS = [
+    "Pow", "Mod", "StTem", "WdSpd", "EnSvSt", "StFahFlg", "ColdMod",
+    "HeatSvStTemMax", "CoolSvStTemMin", "TemUnit", "IndoorType", "OMod",
+    "LowDeHumi", "Quier", "RmType", "RmNum", "VavleAllOn",
+    "CSvStTemMinFlg", "HSvStTemMaxFlg", "AllErr", "InProtocol", "Demand",
+]
+ZONE_CONTROLLER_ZONE_PARAMS = ["Pow", "StTem"]
 
 MAX_UNICAST_SCAN_HOSTS = 65536
 
