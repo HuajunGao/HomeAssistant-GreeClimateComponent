@@ -66,26 +66,32 @@ async def FetchResult(cipher, ip_addr, port, json_data, encryption_version=1, ma
             clientSock.sendto(bytes(json_data, "utf-8"), (ip_addr, port))
 
             # Receive response with event loop yielding
-            data, _ = await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(None, clientSock.recvfrom, 64000), timeout=timeout)
+            data, _ = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(None, clientSock.recvfrom, 64000), timeout=timeout)
 
             # Parse and decrypt response
             received_json = simplejson.loads(data)
             pack = received_json["pack"]
-            decoded_pack = base64.b64decode(pack)
-            decrypted_pack = cipher.decrypt(decoded_pack)
 
-            if encryption_version == 2:
-                tag = received_json["tag"]
-                cipher.verify(base64.b64decode(tag))
+            # Some devices (e.g. Braemar Zone Controller) respond with an
+            # unencrypted plain-JSON pack dict instead of a base64 string.
+            if isinstance(pack, dict):
+                result = pack
+            else:
+                decoded_pack = base64.b64decode(pack)
+                decrypted_pack = cipher.decrypt(decoded_pack)
 
-            # Clean up response data
-            decoded_text = decrypted_pack.decode("utf-8")
-            # Remove null bytes and trailing data after last }
-            clean_text = decoded_text.replace("\x0f", "")
-            last_brace = clean_text.rindex("}")
-            clean_text = clean_text[: last_brace + 1]
+                if encryption_version == 2:
+                    tag = received_json["tag"]
+                    cipher.verify(base64.b64decode(tag))
 
-            result = simplejson.loads(clean_text)
+                # Clean up response data
+                decoded_text = decrypted_pack.decode("utf-8")
+                # Remove null bytes and trailing data after last }
+                clean_text = decoded_text.replace("\x0f", "")
+                last_brace = clean_text.rindex("}")
+                clean_text = clean_text[: last_brace + 1]
+
+                result = simplejson.loads(clean_text)
 
             _LOGGER.debug(f"Successfully received response on attempt {attempt + 1}")
             return result
@@ -93,7 +99,7 @@ async def FetchResult(cipher, ip_addr, port, json_data, encryption_version=1, ma
         except Exception as e:
             if attempt == max_retries - 1:
                 error_msg = f"{type(e).__name__}: {str(e)}" if str(e) else f"{type(e).__name__}"
-                _LOGGER.error(f"All {max_retries} attempts failed for {ip_addr}:{port}. Error: {error_msg}")
+                _LOGGER.warning(f"All {max_retries} attempts failed for {ip_addr}:{port}. Error: {error_msg}")
                 raise
 
         finally:
@@ -572,67 +578,197 @@ async def get_subunits_list(mac_addr, ip_addr, port):
         return {"list": []}
 
 
-async def get_zone_controller_count(mac_addr, ip_addr, port, encryption_version, encryption_key):
+async def _scan_for_sub_cnt(ip_addr, port):
     """
-    Probe whether a device is a ducted zone controller by sending a subList request
-    with the device's own session key.  Returns the number of zones (int >= 1) if it
-    is a zone controller, or 0 if the device does not respond as one.
-
-    The zone controller (e.g. Braemar Dominator) responds to subList with plain JSON:
-        {"t":"subList","r":200,"c":<zone_count>,"i":<bitmask>,"list":[]}
-    where "c" is the number of controllable zones.
+    Send a unicast scan packet to the device and return subCnt from the response.
+    Returns 0 if the device doesn't advertise sub-devices or on failure.
     """
+    loop = asyncio.get_running_loop()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(3)
     try:
-        if encryption_version == 1:
-            cipher = AES.new(encryption_key, AES.MODE_ECB)
-            pack = base64.b64encode(
-                cipher.encrypt(Pad(f'{{"mac":"{mac_addr}","i":"1"}}').encode("utf8"))
-            ).decode("utf-8")
-            payload = f'{{"cid":"app","i":1,"pack":"{pack}","t":"subList","tcid":"{mac_addr}","uid":0}}'
-        elif encryption_version == 2:
-            pack, tag = EncryptGCM(encryption_key, f'{{"mac":"{mac_addr}","i":"1"}}')
-            payload = f'{{"cid":"app","i":1,"pack":"{pack}","t":"subList","tcid":"{mac_addr}","uid":0,"tag":"{tag}"}}'
-            cipher = GetGCMCipher(encryption_key)
-        else:
-            return 0
-
-        # Send raw UDP and parse response directly — the zone controller returns
-        # a plain (unencrypted) JSON response for subList, not a packed response.
-        loop = asyncio.get_running_loop()
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(3)
+        sock.sendto(b'{"t":"scan"}', (ip_addr, port))
         try:
-            sock.sendto(bytes(payload, "utf-8"), (ip_addr, port))
             data, _ = await asyncio.wait_for(
-                loop.run_in_executor(None, sock.recvfrom, 64000),
-                timeout=3,
+                loop.run_in_executor(None, sock.recvfrom, 64000), timeout=3
             )
-        finally:
-            sock.close()
+        except Exception as e:
+            _LOGGER.warning(f"_scan_for_sub_cnt: scan timeout/error: {e}")
+            return 0, None
 
-        response = simplejson.loads(data)
-        _LOGGER.debug(f"get_zone_controller_count raw response: {response}")
+        response = simplejson.loads(data.decode(errors="ignore"))
+        if "pack" not in response:
+            _LOGGER.warning(f"_scan_for_sub_cnt: no pack in scan response: {response}")
+            return 0, None
 
-        # Plain JSON response (zone controller style)
-        if "c" in response:
-            zone_count = response["c"]
-            if isinstance(zone_count, int) and zone_count > 0:
-                return zone_count
+        pack = response["pack"]
+        if isinstance(pack, dict):
+            pack_json = pack
+        else:
+            decoded_pack = base64.b64decode(pack)
+            cipher = AES.new(GENERIC_GREE_DEVICE_KEY.encode("utf-8"), AES.MODE_ECB)
+            decrypted = cipher.decrypt(decoded_pack).decode("utf-8", errors="ignore").replace("\x0f", "")
+            last_brace = decrypted.rfind("}")
+            pack_json = simplejson.loads(decrypted[:last_brace + 1] if last_brace != -1 else decrypted)
 
-        # Packed/encrypted response (normal VRF style)
-        if "pack" in response:
-            try:
-                dec_cipher = AES.new(encryption_key, AES.MODE_ECB)
-                decoded = dec_cipher.decrypt(base64.b64decode(response["pack"]))
-                clean = decoded.decode("utf-8").replace("\x0f", "")
-                clean = clean[: clean.rindex("}") + 1]
-                result = simplejson.loads(clean)
-                zone_count = result.get("c", 0)
-                if isinstance(zone_count, int) and zone_count > 0:
-                    return zone_count
-            except Exception as e:
-                _LOGGER.debug(f"get_zone_controller_count: packed response parse error: {e}")
+        _LOGGER.debug(f"_scan_for_sub_cnt: scan pack response: {pack_json}")
+        sub_cnt = pack_json.get("subCnt", 0)
+        return (int(sub_cnt) if isinstance(sub_cnt, (int, str)) and str(sub_cnt).isdigit() else 0), pack_json
 
     except Exception as e:
-        _LOGGER.debug(f"get_zone_controller_count: not a zone controller or error: {e}")
+        _LOGGER.warning(f"_scan_for_sub_cnt: error: {type(e).__name__}: {e}")
+        return 0, None
+    finally:
+        sock.close()
+
+
+async def _try_sublist(mac_addr, ip_addr, port, bind_result):
+    """
+    Try subList in multiple formats, each on a fresh socket to avoid executor races.
+    Returns zone count (int > 0) on success, or 0 on failure.
+    """
+    loop = asyncio.get_running_loop()
+
+    # Build payload list
+    payloads = []
+
+    # Format A: encrypted inner {"mac":"..","i":"1"}, outer t:subList (matches get_subunits_list)
+    try:
+        enc_cipher_a = AES.new(GENERIC_GREE_DEVICE_KEY.encode("utf8"), AES.MODE_ECB)
+        pack_a = base64.b64encode(enc_cipher_a.encrypt(Pad(f'{{"mac":"{mac_addr}","i":"1"}}').encode("utf8"))).decode("utf-8")
+        payloads.append(("enc-generic", f'{{"cid":"app","i":1,"pack":"{pack_a}","t":"subList","tcid":"{mac_addr}","uid":0}}'))
+    except Exception as e:
+        _LOGGER.debug(f"_try_sublist: enc-generic build error: {e}")
+
+    # Format B: plain JSON outer subList
+    payloads.append(("plain", f'{{"cid":"app","t":"subList","tcid":"{mac_addr}","i":1,"uid":0}}'))
+
+    # Format C: encrypted inner with session key, outer t:pack
+    if "key" in bind_result:
+        try:
+            sk_cipher = AES.new(bind_result["key"].encode("utf8"), AES.MODE_ECB)
+            pack_c = base64.b64encode(sk_cipher.encrypt(Pad(f'{{"mac":"{mac_addr}","t":"subList","uid":0}}').encode("utf8"))).decode("utf-8")
+            payloads.append(("enc-session", f'{{"cid":"app","i":1,"pack":"{pack_c}","t":"pack","tcid":"{mac_addr}","uid":0}}'))
+        except Exception as e:
+            _LOGGER.debug(f"_try_sublist: enc-session build error: {e}")
+
+    for fmt_name, payload in payloads:
+        # Fresh socket per attempt so lingering recvfrom threads can't steal the response
+        sub_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sub_sock.settimeout(2.5)
+        try:
+            sub_sock.sendto(bytes(payload, "utf-8"), (ip_addr, port))
+            try:
+                sub_data, _ = await asyncio.wait_for(
+                    loop.run_in_executor(None, sub_sock.recvfrom, 64000), timeout=2.5
+                )
+                response = simplejson.loads(sub_data)
+                _LOGGER.debug(f"_try_sublist({fmt_name}) response: {response}")
+                if "c" in response and isinstance(response["c"], int) and response["c"] > 0:
+                    return response["c"]
+            except Exception as e:
+                _LOGGER.debug(f"_try_sublist({fmt_name}) timeout/error: {e}")
+        except Exception as e:
+            _LOGGER.debug(f"_try_sublist({fmt_name}) send error: {e}")
+        finally:
+            sub_sock.close()
+
     return 0
+
+
+async def _probe_sub_macs(master_mac, ip_addr, port):
+    """Count zone sub-units by attempting bind to derived sub-MACs (master + 01..08)."""
+    loop = asyncio.get_running_loop()
+    zone_count = 0
+    for i in range(1, 9):
+        sub_mac = f"{master_mac}{i:02d}"
+        sub_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sub_sock.settimeout(2)
+        try:
+            sub_cipher = AES.new(GENERIC_GREE_DEVICE_KEY.encode("utf8"), AES.MODE_ECB)
+            bind_inner = Pad(f'{{"mac":"{sub_mac}","t":"bind","uid":0}}')
+            bind_pack = base64.b64encode(sub_cipher.encrypt(bind_inner.encode("utf8"))).decode("utf-8")
+            bind_payload = f'{{"cid":"app","i":1,"pack":"{bind_pack}","t":"pack","tcid":"{sub_mac}","uid":0}}'
+            sub_sock.sendto(bytes(bind_payload, "utf-8"), (ip_addr, port))
+            try:
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, sub_sock.recvfrom, 64000), timeout=2
+                )
+                _LOGGER.debug(f"_probe_sub_macs: zone {i} sub-MAC {sub_mac} responded")
+                zone_count += 1
+            except Exception:
+                _LOGGER.debug(f"_probe_sub_macs: zone {i} sub-MAC {sub_mac} no response, stopping")
+                break
+        except Exception as e:
+            _LOGGER.debug(f"_probe_sub_macs: error at zone {i}: {e}")
+            break
+        finally:
+            sub_sock.close()
+
+    _LOGGER.debug(f"_probe_sub_macs: detected {zone_count} zones for master {master_mac}")
+    return zone_count
+
+
+async def get_zone_controller_count(mac_addr, ip_addr, port, encryption_version, encryption_key):
+    """
+    Probe whether a device is a ducted zone controller.  Returns the number of
+    zones (int >= 1) if it is a zone controller, or 0 otherwise.
+
+    Detection order:
+      1. Unicast scan -> subCnt field
+      2. bind + three subList formats (each on a fresh socket)
+      3. bind to derived sub-MACs (master + "01".."08")
+    """
+    # Step 1: unicast scan to read subCnt
+    sub_cnt, scan_pack = await _scan_for_sub_cnt(ip_addr, port)
+    if sub_cnt > 0:
+        _LOGGER.info(f"get_zone_controller_count: subCnt={sub_cnt} from scan for {mac_addr}")
+        return sub_cnt
+
+    # Step 2: bind + subList
+    loop = asyncio.get_running_loop()
+    bind_result = None
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(4)
+    try:
+        cipher = AES.new(GENERIC_GREE_DEVICE_KEY.encode("utf8"), AES.MODE_ECB)
+        bind_inner = Pad(f'{{"mac":"{mac_addr}","t":"bind","uid":0}}')
+        bind_pack = base64.b64encode(cipher.encrypt(bind_inner.encode("utf8"))).decode("utf-8")
+        bind_payload = f'{{"cid":"app","i":1,"pack":"{bind_pack}","t":"pack","tcid":"{mac_addr}","uid":0}}'
+        sock.sendto(bytes(bind_payload, "utf-8"), (ip_addr, port))
+        try:
+            bind_data, _ = await asyncio.wait_for(
+                loop.run_in_executor(None, sock.recvfrom, 64000), timeout=4
+            )
+        except Exception as e:
+            _LOGGER.warning(f"get_zone_controller_count: bind timeout/error: {e}")
+            return 0
+
+        bind_json = simplejson.loads(bind_data)
+        pack_field = bind_json.get("pack")
+        if isinstance(pack_field, dict):
+            bind_result = pack_field
+        else:
+            dc = AES.new(GENERIC_GREE_DEVICE_KEY.encode("utf8"), AES.MODE_ECB)
+            decoded = dc.decrypt(base64.b64decode(pack_field))
+            clean = decoded.decode("utf-8").replace("\x0f", "")
+            bind_result = simplejson.loads(clean[: clean.rindex("}") + 1])
+
+        _LOGGER.debug(f"get_zone_controller_count: bind_result={bind_result}")
+        if bind_result.get("t") != "bindOk":
+            _LOGGER.warning(f"get_zone_controller_count: unexpected bind response")
+            return 0
+
+    except Exception as e:
+        _LOGGER.warning(f"get_zone_controller_count: bind error: {type(e).__name__}: {e}")
+        return 0
+    finally:
+        sock.close()
+
+    zone_count = await _try_sublist(mac_addr, ip_addr, port, bind_result)
+    if zone_count > 0:
+        return zone_count
+
+    # Step 3: sub-MAC probe fallback
+    _LOGGER.debug(f"get_zone_controller_count: all subList methods failed, probing sub-MACs for {mac_addr}")
+    return await _probe_sub_macs(mac_addr, ip_addr, port)

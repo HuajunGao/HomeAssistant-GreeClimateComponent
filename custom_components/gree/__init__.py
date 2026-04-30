@@ -87,6 +87,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Gree from a config entry."""
+    _LOGGER.debug(
+        "Gree async_setup_entry called for %s, zone_controller=%s",
+        entry.data.get("host"),
+        entry.data.get("zone_controller"),
+    )
     if DOMAIN not in hass.data:
         hass.data[DOMAIN] = {}
 
@@ -107,30 +112,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Auto-detect zone controller if not already set in config
     if not combined_data.get(CONF_ZONE_CONTROLLER):
         try:
-            from .gree_protocol import GetDeviceKey, GetDeviceKeyGCM, get_zone_controller_count
+            from .gree_protocol import get_zone_controller_count
             mac = combined_data.get(CONF_MAC, "").replace(":", "").replace("-", "").lower()
             ip = combined_data.get(CONF_HOST)
             port = combined_data.get(CONF_PORT, DEFAULT_PORT)
             enc_ver = combined_data.get(CONF_ENCRYPTION_VERSION, 1)
-            if enc_ver == 1:
-                key = await GetDeviceKey(mac, ip, port, max_retries=2)
-            else:
-                key = await GetDeviceKeyGCM(mac, ip, port, max_retries=2)
-            if key:
-                zone_count = await get_zone_controller_count(mac, ip, port, enc_ver, key)
-                if zone_count > 0:
-                    combined_data[CONF_ZONE_CONTROLLER] = True
-                    combined_data[CONF_ZONE_COUNT] = zone_count
-                    _LOGGER.info(f"Auto-detected zone controller with {zone_count} zones for {mac}")
+            zone_count = await get_zone_controller_count(mac, ip, port, enc_ver, None)
+            if zone_count > 0:
+                combined_data[CONF_ZONE_CONTROLLER] = True
+                combined_data[CONF_ZONE_COUNT] = zone_count
+                _LOGGER.info(f"Gree: Auto-detected zone controller with {zone_count} zones for {mac}")
         except Exception as e:
-            _LOGGER.debug(f"Zone controller auto-detection skipped: {e}")
+            _LOGGER.warning(f"Gree zone controller auto-detection failed for {combined_data.get(CONF_HOST)}: {e}")
 
     device = await create_gree_device(hass, combined_data)
 
-    # Store both the config data and the device instance
+    # Zone controller returns a list [master, zone1..zoneN].
+    # Non-climate platforms need only the master; climate platform gets all.
+    if isinstance(device, list):
+        master_device = device[0]
+        climate_devices = device
+    else:
+        master_device = device
+        climate_devices = device
+
     hass.data[DOMAIN][entry.entry_id] = {
         "config": combined_data,
-        "device": device,
+        "device": master_device,
+        "climate_devices": climate_devices,
     }
 
     _LOGGER.debug("Setting up config entry %s with data: %s", entry.entry_id, combined_data)

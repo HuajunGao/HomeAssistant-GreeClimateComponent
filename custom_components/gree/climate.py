@@ -144,15 +144,13 @@ SCAN_INTERVAL = timedelta(seconds=60)
 
 async def async_setup_entry(hass, entry, async_add_devices):
     """Set up Gree climate from a config entry."""
-    # Get the device(s) created in __init__.py
     entry_data = hass.data[DOMAIN][entry.entry_id]
-    device = entry_data["device"]
-
-    # create_gree_device returns a list for zone controllers, or a single entity
-    if isinstance(device, list):
-        async_add_devices(device)
+    # climate_devices key exists for zone controllers; fall back to single device
+    climate_devices = entry_data.get("climate_devices", entry_data.get("device"))
+    if isinstance(climate_devices, list):
+        async_add_devices(climate_devices)
     else:
-        async_add_devices([device])
+        async_add_devices([climate_devices])
 
 
 async def async_unload_entry(hass, entry):
@@ -321,7 +319,9 @@ class GreeClimate(ClimateEntity):
             pack, tag = EncryptGCM(self._encryption_key, plaintext)
             jsonPayloadToSend = '{"cid":"app","i":0,"pack":"' + pack + '","t":"pack","tcid":"' + str(self._mac_addr) + '","uid":{}'.format(self._uid) + ',"tag" : "' + tag + '"}'
             cipher = GetGCMCipher(self._encryption_key)
-        result = await FetchResult(cipher, self._ip_addr, self._port, jsonPayloadToSend, encryption_version=self.encryption_version)
+        # Zone entities use 2 retries: empty zone slots should fail fast, not hang for 26s
+        max_retries = 2 if self._is_zone_controller else 8
+        result = await FetchResult(cipher, self._ip_addr, self._port, jsonPayloadToSend, encryption_version=self.encryption_version, max_retries=max_retries)
         # Use the cols the device actually returned (may be fewer than requested).
         # Returning a dict ensures SetAcOptions never gets a length mismatch.
         cols = result.get("cols", propertyNames)
