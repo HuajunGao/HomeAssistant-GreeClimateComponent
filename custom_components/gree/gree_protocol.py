@@ -578,7 +578,7 @@ async def get_zone_controller_count(mac_addr, ip_addr, port, encryption_version,
     with the device's own session key.  Returns the number of zones (int >= 1) if it
     is a zone controller, or 0 if the device does not respond as one.
 
-    The zone controller (e.g. Braemar Dominator) responds to subList with:
+    The zone controller (e.g. Braemar Dominator) responds to subList with plain JSON:
         {"t":"subList","r":200,"c":<zone_count>,"i":<bitmask>,"list":[]}
     where "c" is the number of controllable zones.
     """
@@ -596,12 +596,43 @@ async def get_zone_controller_count(mac_addr, ip_addr, port, encryption_version,
         else:
             return 0
 
-        result = await FetchResult(cipher, ip_addr, port, payload,
-                                   encryption_version=encryption_version, max_retries=2)
-        _LOGGER.debug(f"get_zone_controller_count: {result}")
-        zone_count = result.get("c", 0)
-        if isinstance(zone_count, int) and zone_count > 0:
-            return zone_count
+        # Send raw UDP and parse response directly — the zone controller returns
+        # a plain (unencrypted) JSON response for subList, not a packed response.
+        loop = asyncio.get_running_loop()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(3)
+        try:
+            sock.sendto(bytes(payload, "utf-8"), (ip_addr, port))
+            data, _ = await asyncio.wait_for(
+                loop.run_in_executor(None, sock.recvfrom, 64000),
+                timeout=3,
+            )
+        finally:
+            sock.close()
+
+        response = simplejson.loads(data)
+        _LOGGER.debug(f"get_zone_controller_count raw response: {response}")
+
+        # Plain JSON response (zone controller style)
+        if "c" in response:
+            zone_count = response["c"]
+            if isinstance(zone_count, int) and zone_count > 0:
+                return zone_count
+
+        # Packed/encrypted response (normal VRF style)
+        if "pack" in response:
+            try:
+                dec_cipher = AES.new(encryption_key, AES.MODE_ECB)
+                decoded = dec_cipher.decrypt(base64.b64decode(response["pack"]))
+                clean = decoded.decode("utf-8").replace("\x0f", "")
+                clean = clean[: clean.rindex("}") + 1]
+                result = simplejson.loads(clean)
+                zone_count = result.get("c", 0)
+                if isinstance(zone_count, int) and zone_count > 0:
+                    return zone_count
+            except Exception as e:
+                _LOGGER.debug(f"get_zone_controller_count: packed response parse error: {e}")
+
     except Exception as e:
         _LOGGER.debug(f"get_zone_controller_count: not a zone controller or error: {e}")
     return 0

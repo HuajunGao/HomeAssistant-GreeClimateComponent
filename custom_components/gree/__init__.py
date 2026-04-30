@@ -32,6 +32,8 @@ from .const import (
     CONF_SWING_MODES,
     CONF_TEMP_SENSOR_OFFSET,
     CONF_UID,
+    CONF_ZONE_CONTROLLER,
+    CONF_ZONE_COUNT,
     DEFAULT_FAN_MODES,
     DEFAULT_HVAC_MODES,
     DEFAULT_PORT,
@@ -101,6 +103,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Create the Gree device instance here and store it
     from .climate import create_gree_device
+
+    # Auto-detect zone controller if not already set in config
+    if not combined_data.get(CONF_ZONE_CONTROLLER):
+        try:
+            from .gree_protocol import GetDeviceKey, GetDeviceKeyGCM, get_zone_controller_count
+            mac = combined_data.get(CONF_MAC, "").replace(":", "").replace("-", "").lower()
+            ip = combined_data.get(CONF_HOST)
+            port = combined_data.get(CONF_PORT, DEFAULT_PORT)
+            enc_ver = combined_data.get(CONF_ENCRYPTION_VERSION, 1)
+            if enc_ver == 1:
+                key = await GetDeviceKey(mac, ip, port, max_retries=2)
+            else:
+                key = await GetDeviceKeyGCM(mac, ip, port, max_retries=2)
+            if key:
+                zone_count = await get_zone_controller_count(mac, ip, port, enc_ver, key)
+                if zone_count > 0:
+                    combined_data[CONF_ZONE_CONTROLLER] = True
+                    combined_data[CONF_ZONE_COUNT] = zone_count
+                    _LOGGER.info(f"Auto-detected zone controller with {zone_count} zones for {mac}")
+        except Exception as e:
+            _LOGGER.debug(f"Zone controller auto-detection skipped: {e}")
 
     device = await create_gree_device(hass, combined_data)
 
