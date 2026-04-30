@@ -449,7 +449,6 @@ class GreeClimate(ClimateEntity):
         _LOGGER.debug(f"{self._name}: HVAC mode updated to {self._hvac_mode}")
 
     def UpdateHACurrentSwingMode(self):
-    def UpdateHACurrentSwingMode(self):
         # Sync current HVAC Swing mode state to HA
         if self._acOptions.get("SwUpDn") is None:
             return
