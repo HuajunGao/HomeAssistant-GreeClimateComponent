@@ -296,6 +296,30 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not is_connection_valid:
                 errors["base"] = "cannot_connect"
             else:
+                mac_addr = self._data[CONF_MAC].replace(":", "").replace("-", "").lower()
+                ip_addr = self._data[CONF_HOST]
+                port = self._data[CONF_PORT]
+
+                # Auto-detect encryption version if not explicitly set
+                enc_version = self._data.get(CONF_ENCRYPTION_VERSION, 1)
+                enc_key_str = self._data.get(CONF_ENCRYPTION_KEY, "")
+
+                # Probe for zone controller using the session key
+                try:
+                    from .gree_protocol import GetDeviceKey, GetDeviceKeyGCM
+                    if enc_version == 1:
+                        key = await GetDeviceKey(mac_addr, ip_addr, port, max_retries=2)
+                    else:
+                        key = await GetDeviceKeyGCM(mac_addr, ip_addr, port, max_retries=2)
+                    if key:
+                        zone_count = await get_zone_controller_count(mac_addr, ip_addr, port, enc_version, key)
+                        if zone_count > 0:
+                            self._data[CONF_ZONE_CONTROLLER] = True
+                            self._data[CONF_ZONE_COUNT] = zone_count
+                            _LOGGER.debug(f"Manual setup: detected zone controller with {zone_count} zones")
+                except Exception as e:
+                    _LOGGER.debug(f"Manual setup: zone controller probe skipped: {e}")
+
                 return self.async_create_entry(title=user_input[CONF_NAME], data=self._data)
 
         # Set defaults from user_input if present, else use hardcoded defaults
