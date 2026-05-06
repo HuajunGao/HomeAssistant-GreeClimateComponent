@@ -53,6 +53,15 @@ OPTION_KEYS = {
     CONF_TEMP_SENSOR_OFFSET,
 }
 
+# Braemar zone controller uses a different Mod encoding than standard Gree
+ZONE_CONTROLLER_MOD_MAPPING = {
+    "cool": 1,
+    "heat": 2,
+    "dry": 3,
+    "fan_only": 4,
+    "auto": 5,
+}
+
 MODES_MAPPING = {
   "Mod" : {
     "auto" : 0,

@@ -42,6 +42,7 @@ from .const import (
     MAX_TEMP_C,
     MAX_TEMP_F,
     MODES_MAPPING,
+    ZONE_CONTROLLER_MOD_MAPPING,
     TEMSEN_OFFSET,
     CONF_HVAC_MODES,
     CONF_FAN_MODES,
@@ -443,7 +444,8 @@ class GreeClimate(ClimateEntity):
         if self._acOptions["Pow"] == 0:
             self._hvac_mode = HVACMode.OFF
         else:
-            for key, value in MODES_MAPPING.get("Mod").items():
+            mod_map = ZONE_CONTROLLER_MOD_MAPPING if self._is_zone_controller else MODES_MAPPING.get("Mod")
+            for key, value in mod_map.items():
                 if value == (self._acOptions["Mod"]):
                     self._hvac_mode = key
         _LOGGER.debug(f"{self._name}: HVAC mode updated to {self._hvac_mode}")
@@ -1025,7 +1027,8 @@ class GreeClimate(ClimateEntity):
             if hasattr(self, "_auto_light") and self._auto_light:
                 c.update({"Lig": 0})
         else:
-            mod = MODES_MAPPING.get("Mod").get(hvac_mode)
+            mod_map = ZONE_CONTROLLER_MOD_MAPPING if self._is_zone_controller else MODES_MAPPING.get("Mod")
+            mod = mod_map.get(hvac_mode)
             c.update({"Pow": 1, "Mod": mod})
             if hasattr(self, "_auto_light") and self._auto_light:
                 c.update({"Lig": 1})
